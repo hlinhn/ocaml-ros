@@ -32,7 +32,6 @@ let runNode name sl =
   let (t, w) = Lwt.wait () in
   let () = Lwt.async (fun () -> t >>= (fun _ -> cleanupNode sl)) in
   let shutdown = fun () -> (Lwt.wakeup w ()) in
-  (*                            Lwt_condition.signal doneCleanUp ()) in*)
   let () = Lwt_switch.add_hook (Some quit) (fun () -> Lwt.return (shutdown ())) in
 
   let handler = function
@@ -44,5 +43,4 @@ let runNode name sl =
               let waitSig = runSlave sl in
               registerNode name sl
               >>= (fun _ -> waitSig ())))
-                    (*              >>= (fun _ -> Lwt_condition.wait doneCleanUp)))*)
         
