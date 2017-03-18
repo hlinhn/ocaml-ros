@@ -8,10 +8,11 @@ module Node = struct
                       }
                           
   type publication = { mutable subscribers : uri list;
-                       mutable subAddr : Lwt_unix.file_descr list;
+                       mutable subAddr : (Lwt_unix.file_descr * ((bytes option -> unit) * bytes Lwt_stream.t)) list;
                        pubType : string;
                        pubPort : int;
                        pubTopic : topic;
+                       pubCleanUp : unit -> unit;
                        mutable pubStats: (uri * publishStats) list;
                      }
                        
@@ -27,31 +28,12 @@ module Node = struct
                         
   type nodeStat = { nodeName : string;
                     master : uri;
-                    nodeUri : uri;
+                    mutable nodeUri : uri;
+                    mutable signalShutdown : Lwt_switch.t;
                     subscribe : (string * subscription) list;
                     publish : (string * publication) list;
                   }
-                    
-  let startUpNode = { nodeName = "";
-                      master = "";
-                      nodeUri = "";
-                      subscribe = [];
-                      publish = []; }
-
-  let startUpSub = { publishers = [];
-                     subType = "";
-                     add = (fun x -> Lwt.return (Printf.printf "%s\n%!" x));
-                     subStats = [];
-                   }
-
-  let startUpPub = { subscribers = [];
-                     subAddr = [];
-                     pubType = "";
-                     pubPort = -1;
-                     pubTopic = Topic (fst (Lwt_stream.create ()));
-                     pubStats = [];
-                   }
-                     
+                                         
   let getPublications n =
     let formatPub (name, p) = (name, p.pubType, p.pubStats) in
     List.map formatPub n.publish
@@ -81,4 +63,11 @@ module Node = struct
     else
       let p = List.assoc name (n.publish) in
       Some p.pubPort
+
+  let setShutdownAct n act = n.signalShutdown <- act
+  let stopNode n =
+    let () = Printf.printf "In stopNode\n%!" in
+    List.map (fun p -> let p' = snd p in
+                       p'.pubCleanUp ()) n.publish
+
 end

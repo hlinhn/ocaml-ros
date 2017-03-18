@@ -1,10 +1,11 @@
 (*
 receive callbacks from master
 negotiating connections with other nodes
-every node has one of these
  *)
+
 open Node.Node
 open Rpc
+open MasterAPI
        
 let rInt x = Int32 (BatInt32.of_int x)
 let mkPub (n, _, pub) =
@@ -19,36 +20,6 @@ let mkSub (n, _, sub) =
    So any functions that used node and id alone is not going to have
    modules to convert to rpc
  *)
-module type RPC_TYPE =
-  sig
-    type t
-    val rpc_of_t : t -> Rpc.t
-    val t_of_rpc : Rpc.t -> t
-  end
-    
-module type PARAM =
-  functor (R: RPC_TYPE) ->
-  sig
-    type a = R.t
-    val convert_to_rpc: a -> Rpc.t
-    val convert_to_t: Rpc.t -> a
-    val unroll : Rpc.t list -> a
-  end
-
-module MakeParam : PARAM =
-  functor (R: RPC_TYPE) ->
-  struct
-    type a = R.t
-    let convert_to_rpc x = R.rpc_of_t x
-    let convert_to_t x = R.t_of_rpc x
-    let unroll x =
-      let open Rpc in
-      let open Xmlrpc in
-      let str = Xmlrpc.to_string (Enum x) in  
-      let middle = Xmlrpc.of_string str in
-      R.t_of_rpc middle    
-  end
-
     
 let getBusStats n id =  
   let pub = Enum (List.map mkPub (getPublications n)) in
@@ -118,9 +89,102 @@ let requestTopic n ls =
      else
        Enum [rInt 1; String "No protocols supported"; Enum []]
 
-let shutdown n id =
-  (* some cleanup action here *)
-  (1, "", true)
+let callRequestTopic addr nname tname prot_ls =
+  let call = Rpc.call "requestTopic"
+                      [String nname; String tname; Enum prot_ls] in
+  postReq call addr
+            
+let shutdown n cond id =
+  (*  let _ = stopNode n in*)
+  let () = Lwt.async (fun () -> Lwt_switch.turn_off n.signalShutdown) in
+  Enum [rInt 1; String "Shutting down"; Bool true]
+       
+let cleanupNode n =
+  let open Lwt in
+  let open MasterAPI in
+  let pubs = n.publish in
+  let subs = n.subscribe in
+  let nuri = n.nodeUri in
+  let nname = n.nodeName in
+  let master = n.master in
+  let () = Printf.printf "In cleanupNode\n%!" in
+  let sp = fun () -> Lwt.join (List.map (fun p -> unregisterPublisher master nname (fst p) nuri >|= (fun _ ->())) pubs) in
+  let ss = fun () -> Lwt.join (List.map (fun s -> unregisterSubscriber master nname (fst s) nuri >|= (fun _ ->())) subs) in
+  sp () >>= (fun _ -> ss ()) >|= (fun _ -> stopNode n)
+  
+let slaveRPC tnode cond req =
+  match req.name with
+  | "publisherUpdate" -> pubUpdate tnode req.params
+  | "requestTopic" -> requestTopic tnode req.params
+  | "getBusStats" -> getBusStats tnode req.params
+  | "getBusInfo" -> getBusInfo tnode req.params
+  | "getMasterUri" -> getMasterUri tnode req.params
+  | "shutdown" -> shutdown tnode cond req.params
+  | "getPid" -> getPid tnode
+  | "getSubscriptions" -> getSubs tnode req.params
+  | "getPublications" -> getPubs tnode req.params
+  | _ -> Enum [rInt 0; String "Unknown"; rInt 1]
+    
+let handle_request tnode cond req =
+  let rep = slaveRPC tnode cond (Xmlrpc.call_of_string req) in
+  String.concat "" ["<?xml version=\"1.0\"?><methodResponse><params><param>"; Xmlrpc.to_string rep; "</param></params></methodResponse>"]
 
-let slaveRPC n sem s =
-  ()
+let findPort () =
+  let s_descr = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+  let name = Unix.gethostname () in
+  let addr = (Unix.gethostbyname name).Unix.h_addr_list.(0) in  
+  let () = Unix.bind s_descr (Unix.ADDR_INET(addr, 0)) in
+  let (_, p) =
+    match Unix.getsockname s_descr with
+      Unix.ADDR_INET (a, n) -> (a, n)
+    | _ -> failwith "Not INET" in
+  let () = Unix.close s_descr in
+  (addr, p)
+
+let server pnum handler =
+  let open Lwt in
+  let open Cohttp in
+  let open Cohttp_lwt_unix in
+  let callback _conn req body =
+    body |> Cohttp_lwt_body.to_string >|=
+      (fun body ->
+        (Printf.sprintf "%s" (handler body)))
+    >>= (fun body ->
+      Server.respond_string ~headers:(Header.init_with "content-type" "text/xml") ~status:`OK ~body ()) in
+  Server.create ~mode:(`TCP (`Port pnum)) (Server.make ~callback ()) 
+
+let runLoop ?cleanup:(fc = fun () -> ()) ?message:(msg = "") f =
+  let open Lwt in
+  let (t, w) = Lwt.wait () in
+  let exec = (t >>= fun _ -> f()) in
+  let thread_t = ref exec in
+  let launch () = 
+    let () = Lwt.wakeup w () in
+    Lwt.async (fun () ->
+        Lwt.catch (fun () -> !thread_t)
+                  (fun exn -> fc ();
+                              Lwt.return (Printf.printf "%s\n%!" msg))) in
+  let cancel = fun () -> Lwt.cancel !thread_t in
+  (launch, cancel)
+
+    
+let runSlave sl =
+  let open Lwt in
+  let quitsig = Lwt_condition.create () in
+  let (_, p) = findPort () in
+  let nuri = String.concat "" ["http://"; Unix.gethostname (); ":"; Pervasives.string_of_int p] in
+  let () = sl.nodeUri <- nuri in
+  let serv = fun () -> server p (handle_request sl quitsig) in
+
+  let (run_server, stop_server) = runLoop ~message:"Terminating server"
+                                          ~cleanup:(fun () -> Lwt_condition.signal quitsig ())
+                                          serv in
+  let () = Lwt_switch.add_hook (Some sl.signalShutdown) (fun () -> Lwt.return (Lwt_condition.signal quitsig ())) in
+  let () = run_server () in
+  let wait_t = fun () ->
+    (Lwt_condition.wait quitsig) >>=
+      (fun _ -> Lwt_unix.sleep 1.0) >>=
+      (fun _ -> (*let _ = stopNode sl in*)
+                Lwt.return (stop_server ())) in
+  wait_t 
+       
