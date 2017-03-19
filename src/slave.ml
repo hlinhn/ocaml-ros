@@ -94,39 +94,37 @@ let callRequestTopic addr nname tname prot_ls =
                       [String nname; String tname; Enum prot_ls] in
   postReq call addr
             
-let shutdown n cond id =
-  (*  let _ = stopNode n in*)
+let shutdown n id =
   let () = Lwt.async (fun () -> Lwt_switch.turn_off n.signalShutdown) in
   Enum [rInt 1; String "Shutting down"; Bool true]
        
 let cleanupNode n =
   let open Lwt in
   let open MasterAPI in
-  let pubs = n.publish in
-  let subs = n.subscribe in
   let nuri = n.nodeUri in
   let nname = n.nodeName in
-  let master = n.master in
   let () = Printf.printf "In cleanupNode\n%!" in
-  let sp = fun () -> Lwt.join (List.map (fun p -> unregisterPublisher master nname (fst p) nuri >|= (fun _ ->())) pubs) in
-  let ss = fun () -> Lwt.join (List.map (fun s -> unregisterSubscriber master nname (fst s) nuri >|= (fun _ ->())) subs) in
-  sp () >>= (fun _ -> ss ()) >|= (fun _ -> stopNode n)
+  let _ = stopNode n in
+  Lwt.join ((List.map
+               (fun p -> unregisterPublisher n.master nname (fst p) nuri >|= (fun _ ->())) n.publish) @
+              (List.map
+                 (fun s -> unregisterSubscriber n.master nname (fst s) nuri >|= (fun _ ->())) n.subscribe))
   
-let slaveRPC tnode cond req =
+let slaveRPC tnode req =
   match req.name with
   | "publisherUpdate" -> pubUpdate tnode req.params
   | "requestTopic" -> requestTopic tnode req.params
   | "getBusStats" -> getBusStats tnode req.params
   | "getBusInfo" -> getBusInfo tnode req.params
   | "getMasterUri" -> getMasterUri tnode req.params
-  | "shutdown" -> shutdown tnode cond req.params
+  | "shutdown" -> shutdown tnode req.params
   | "getPid" -> getPid tnode
   | "getSubscriptions" -> getSubs tnode req.params
   | "getPublications" -> getPubs tnode req.params
   | _ -> Enum [rInt 0; String "Unknown"; rInt 1]
     
-let handle_request tnode cond req =
-  let rep = slaveRPC tnode cond (Xmlrpc.call_of_string req) in
+let handle_request tnode req =
+  let rep = slaveRPC tnode (Xmlrpc.call_of_string req) in
   String.concat "" ["<?xml version=\"1.0\"?><methodResponse><params><param>"; Xmlrpc.to_string rep; "</param></params></methodResponse>"]
 
 let findPort () =
@@ -163,28 +161,24 @@ let runLoop ?cleanup:(fc = fun () -> ()) ?message:(msg = "") f =
     Lwt.async (fun () ->
         Lwt.catch (fun () -> !thread_t)
                   (fun exn -> fc ();
-                              Lwt.return (Printf.printf "%s\n%!" msg))) in
+                              Lwt.return (Printf.printf "%s" msg))) in
   let cancel = fun () -> Lwt.cancel !thread_t in
   (launch, cancel)
 
     
 let runSlave sl =
   let open Lwt in
-  let quitsig = Lwt_condition.create () in
+  let (t, w) = Lwt.wait () in
   let (_, p) = findPort () in
   let nuri = String.concat "" ["http://"; Unix.gethostname (); ":"; Pervasives.string_of_int p] in
   let () = sl.nodeUri <- nuri in
-  let serv = fun () -> server p (handle_request sl quitsig) in
+  let serv = fun () -> server p (handle_request sl) in
 
-  let (run_server, stop_server) = runLoop ~message:"Terminating server"
-                                          ~cleanup:(fun () -> Lwt_condition.signal quitsig ())
+  let (run_server, stop_server) = runLoop ~message:"Terminating server\n%!"
                                           serv in
-  let () = Lwt_switch.add_hook (Some sl.signalShutdown) (fun () -> Lwt.return (Lwt_condition.signal quitsig ())) in
-  let () = run_server () in
-  let wait_t = fun () ->
-    (Lwt_condition.wait quitsig) >>=
-      (fun _ -> Lwt_unix.sleep 1.0) >>=
-      (fun _ -> (*let _ = stopNode sl in*)
-                Lwt.return (stop_server ())) in
-  wait_t 
+(*  let () = Lwt_switch.add_hook (Some sl.signalShutdown) (fun () ->
+                                 let () = stop_server () in
+                                 Lwt.return (Lwt.wakeup w ())) in*)
+  let wait_t = fun () -> t in
+  (wait_t, stop_server, w, run_server) 
        

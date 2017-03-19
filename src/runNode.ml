@@ -25,22 +25,23 @@ let runNode name sl =
   let open Slave in
   let open Node.Node in
 
-  let doneCleanUp = Lwt_condition.create () in
   let quit = Lwt_switch.create () in
   let () = setShutdownAct sl quit in
 
-  let (t, w) = Lwt.wait () in
-  let () = Lwt.async (fun () -> t >>= (fun _ -> cleanupNode sl)) in
-  let shutdown = fun () -> (Lwt.wakeup w ()) in
-  let () = Lwt_switch.add_hook (Some quit) (fun () -> Lwt.return (shutdown ())) in
-
+  let (waitSig, stop, w, run) = runSlave sl in
+  let () = Lwt_switch.add_hook
+             (Some quit) (fun () -> cleanupNode sl >|=
+                                      (fun _ -> stop ()) >|=
+                                      (fun _ -> Lwt.wakeup w ())
+                         ) in
+  
   let handler = function
     | n when n = Sys.sigint -> Lwt.async (fun () -> Lwt_switch.turn_off quit)
     | _ -> Printf.printf "Unhandled\n%!" in
   let () = Sys.catch_break true in
   let () = Sys.set_signal Sys.sigint (Sys.Signal_handle handler) in
+  let () = run () in
   ignore (Lwt_main.run (
-              let waitSig = runSlave sl in
               registerNode name sl
               >>= (fun _ -> waitSig ())))
         

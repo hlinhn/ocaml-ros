@@ -66,9 +66,8 @@ let rec consume chan =
 
 let rec feed push n =
   let msg = String.concat " " ["Hello World"; Pervasives.string_of_int n] in
-  let () = Printf.printf "%s\n%!" msg in
   Lwt.return (push (Some msg)) >>=
-    (fun _ -> Lwt_unix.sleep 1.0) >>=
+    (fun _ -> Lwt_unix.yield ()) >>=
     (fun _ -> feed push (n + 1))
         
 (*let () =
@@ -83,13 +82,15 @@ let rec feed push n =
  *)
 
 let () =
-  let (chan, push) = Lwt_stream.create () in
-  let (nnode, waitsig) = advertise chan push "/chatter" "" mynode in
+  let (nnode, chan) = subscribe "/chatter" "" mynode in
+  let (chan2, push2) = Lwt_stream.create () in
+  let (nnode, waitsig2) = advertise chan2 push2 "/chatter2" "" nnode in
   let () =
-    match waitsig with
+    match chan with
     | None -> ()
-    | Some signal ->
-       let (run, cancel) = runLoop (fun () -> feed push 0)
-                                   ~cleanup:(fun () -> Lwt.wakeup signal ()) in
+    | Some c ->
+       let (run, cancel) = runLoop (fun () -> consume c) in
+       let (run2, _) = runLoop (fun () -> feed push2 0) in
+       let () = run2 () in
        run () in
   ignore (runNode "Mynode" nnode)

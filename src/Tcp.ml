@@ -93,7 +93,7 @@ let subStream nname tname msgLocation push publisher =
              let conn () = connect s_descr addr in
              let (ttype, md5) = createTypeInfo msgLocation in
              let (launch, cancel) = runLoop
-                                      ~message:"Abort pushing info to stream" 
+                                      ~message:"Abort pushing info to stream\n%!" 
                                       (fun () -> pushInfo s_descr push) in
              conn ()
              >>= (fun _ -> negotiateSub s_descr nname tname ttype md5)
@@ -121,25 +121,28 @@ let rec acceptClient sock pub negotiate cleanup =
          let (st, pf) = Lwt_stream.create () in
          let () = pub.subAddr <- ((clientSock, (pf, st)) :: clients) in
          let (launch, cancel) = runLoop
-                                  ~cleanup:(fun () -> pub.subAddr <- List.remove_assoc clientSock pub.subAddr)
+                                  ~cleanup:(fun () ->
+                                    pub.subAddr <- List.remove_assoc clientSock pub.subAddr)
                                   (fun () -> writeClient clientSock st) in
          let () = launch () in
          Printf.printf "Accepted..\n%!";
          acceptClient sock pub negotiate
-                      (cleanup >|= fun _ -> cancel ())))
+                      (cleanup
+                       >>= (fun _ -> if Lwt_unix.state clientSock == Lwt_unix.Opened then Lwt_unix.close clientSock else Lwt.return (Printf.printf "Already closed\n%!"))
+  )))
         
 let rec pubAction tp formatMsg publisher =
   let open Node.Node in
   Lwt_stream.get tp >>=
     (fun elem ->
+      let tosend = 
+        match elem with
+        | Some e -> Some (formatMsg e)
+        | None -> None in
+      let clients = publisher.subAddr in
+      let _ = List.map (fun (_, (pf, _)) -> pf tosend) clients in
       match elem with
-      | Some e ->
-         let clients = publisher.subAddr in
-         let msg = formatMsg e in
-         let _ = List.map (fun (_, (pf, _)) ->
-                     pf (Some msg);  
-                     Printf.printf "Pending..\n%!") clients in
-         pubAction tp formatMsg publisher
+      | Some e -> pubAction tp formatMsg publisher
       | None -> Lwt.return ())
 
 let runServerHelper pnum negotiate publishStream publisher =
@@ -150,11 +153,14 @@ let runServerHelper pnum negotiate publishStream publisher =
   let () = Lwt_unix.listen sock 5 in
   let (t, w) = Lwt.wait () in
   let accept () = acceptClient sock publisher negotiate t in
-  let (serve, stop) = runLoop (fun () -> publishStream publisher) in
+  let (serve, stop) = runLoop (fun () -> publishStream publisher)
+                              ~message:"Stop server helper here\n%!"
+  in
   let () = Lwt.async (fun () -> accept ()) in
   let () = serve () in
-  let cleanup () = Lwt.wakeup w (); stop ();
-                   Lwt_unix.close sock in
+  let cleanup () = Lwt.wakeup w (); Lwt.return (stop ())
+                   (*Lwt_unix.close sock
+                   >>= fun _ -> Lwt.return (Printf.printf "Closed socket\n%!"*) in
   cleanup
 
 let runServers nname ls =
