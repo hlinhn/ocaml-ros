@@ -21,6 +21,70 @@ let registerNode name sl =
   let s = fun () -> Lwt.join (List.map (registerSubscription name sl master nuri) (getSubscriptions sl)) in
   s () >>= (fun _ -> p ())
 
+let makeSub tname msgLocation nname =
+  let open Node.Node in
+  let open Tcp in
+  let (channel, push) = Lwt_stream.create () in
+  let (ttype, _) = TypeInfo.createTypeInfo msgLocation in
+  let newsubs = { publishers = [];
+                  subType = ttype;
+                  add = subStream nname tname msgLocation push;
+                  subStats = []; } in
+  (newsubs, channel)
+    
+let makePub _topic msgLocation push =
+  let open Slave in
+  let open Node.Node in
+  let (_, pnum) = findPort () in
+  let (ttype, _) = TypeInfo.createTypeInfo msgLocation in
+  let newpubs = { subscribers = [];
+                  subAddr = [];
+                  pubType = ttype;
+                  pubPort = pnum;
+                  pubTopic = Topic _topic;
+                  pubCleanUp = (fun () -> push None);
+                  pubStats = [] } in
+  newpubs
+    
+let subscribe tname msgLocation node =
+  let open Node.Node in
+  let subs_list = node.subscribe in
+  if List.mem_assoc tname subs_list then (node, None)
+  else
+    if List.mem_assoc tname node.publish then (node, None)
+    else
+      let (newsubs, chan) = makeSub tname msgLocation node.nodeName in
+      ({ node with subscribe = (tname, newsubs) :: node.subscribe },
+       Some chan)
+        
+let advertise chan push tname msgLocation node =
+  let open Node.Node in
+  let open Tcp in
+  let pub_list = node.publish in
+  if List.mem_assoc tname pub_list then (node, None)
+  else
+    if List.mem_assoc tname node.subscribe then (node, None)
+    else
+      let newpubs = makePub chan msgLocation push in
+      let nodenew = { node with publish = (tname, newpubs) :: node.publish } in
+      let info = (newpubs.pubPort, msgLocation, chan, newpubs) in
+      let cleanup = runServers nodenew.nodeName [info] in
+      (nodenew, Some cleanup)
+
+let initNode name =
+  let open Node.Node in
+  let master_ = try Unix.getenv "ROS_MASTER_URI" with
+               | Not_found -> raise (Failure "Master URI is not set")
+               | _ -> raise (Failure "Errors while getenv") in
+  
+  { nodeName = name;
+    master = master_;
+    nodeUri = "";
+    signalShutdown = Lwt_switch.create();
+    subscribe = [];
+    publish = [];
+  }
+
 let runNode name sl =
   let open Slave in
   let open Node.Node in

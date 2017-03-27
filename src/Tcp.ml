@@ -10,7 +10,6 @@ let sendHeader sock nname tname ttype md5 =
   Lwt_unix.send sock header 0 (String.length header) []
            
 let getInfo sock =
-  let () = Printf.printf "Getting info..\n%!" in
   let buff = Bytes.create 4 in
   Lwt_unix.recv sock buff 0 4 [] >>=
     (fun len -> if len == 0 then Lwt.return(None)
@@ -65,14 +64,15 @@ let getMsg m =
   let msg = Bytes.sub m 4 ((Bytes.length m) - 4) in
   (msglen, msg)
     
-let rec pushInfo sock push =
+let rec pushInfo sock push unpack =
   getInfo sock >>=
     (fun msg ->
       match msg with
       | None -> Lwt.return (Printf.printf "Publisher stopped\n%!")
-      | Some m -> let (len, msg) = getMsg m in
-                  Lwt.return (push (Some msg)) >>=
-                    (fun _ -> pushInfo sock push))
+      | Some m -> let orig = unpack m in
+                  Lwt.return (push (Some orig)) >>=
+                    (fun _ -> Lwt_unix.yield ()) >>=
+                    (fun _ -> pushInfo sock push unpack))
         
 let subStream nname tname msgLocation push publisher =
   let open Slave in
@@ -92,9 +92,10 @@ let subStream nname tname msgLocation push publisher =
              let addr = Unix.ADDR_INET (ip, int_of_rpc port) in
              let conn () = connect s_descr addr in
              let (ttype, md5) = createTypeInfo msgLocation in
+             let unpackFun = unpackType msgLocation in
              let (launch, cancel) = runLoop
                                       ~message:"Abort pushing info to stream\n%!" 
-                                      (fun () -> pushInfo s_descr push) in
+                                      (fun () -> pushInfo s_descr push unpackFun) in
              conn ()
              >>= (fun _ -> negotiateSub s_descr nname tname ttype md5)
              >|= (fun _ -> launch ())
@@ -107,6 +108,7 @@ let rec writeClient sock st =
   >>= (fun msg ->
     match msg with
     | Some m -> Lwt_unix.send sock m 0 (String.length m) []
+                >>= (fun _ -> Lwt_unix.yield ())
                 >>= (fun _ -> writeClient sock st)
     | None -> Lwt.return ())
       
@@ -142,7 +144,8 @@ let rec pubAction tp formatMsg publisher =
       let clients = publisher.subAddr in
       let _ = List.map (fun (_, (pf, _)) -> pf tosend) clients in
       match elem with
-      | Some e -> pubAction tp formatMsg publisher
+      | Some e -> Lwt_unix.yield ()
+                  >>= fun _ -> pubAction tp formatMsg publisher
       | None -> Lwt.return ())
 
 let runServerHelper pnum negotiate publishStream publisher =
