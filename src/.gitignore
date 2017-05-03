@@ -1,0 +1,8 @@
+*.o
+*.cmi
+*.cmx
+*.opt
+*.annot~
+*.annot
+*.mli~
+*.ml~
